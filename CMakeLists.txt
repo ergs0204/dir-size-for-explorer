@@ -1,8 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
-project(DirSizeForExplorer VERSION 1.1.0 LANGUAGES CXX)
+project(DirSizeForExplorer VERSION 1.1.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Match the x64-windows-static dependencies; ship self-contained binaries.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
+enable_testing()
 
 # Only support x64 builds
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)

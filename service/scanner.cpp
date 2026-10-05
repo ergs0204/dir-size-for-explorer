@@ -1,6 +1,8 @@
 #include "scanner.h"
 #include "log_buffer.h"
 
+#include <ShlObj.h>
+
 #include <chrono>
 #include <algorithm>
 
@@ -108,7 +110,7 @@ void Scanner::SchedulerThread() {
                 std::vector<DirEntry> entries;
                 ScanDirectory(path, 0, entries);
                 if (!entries.empty()) {
-                    m_db->UpsertEntries(entries);
+                    FlushEntries(entries);
                 }
             }
         }
@@ -122,6 +124,12 @@ void Scanner::SchedulerThread() {
 
 void Scanner::FullScan() {
     m_scanning.store(true);
+    m_throttle.Apply();
+    m_lastProgressTick = GetTickCount64();
+    m_filesSeen = 0;
+    m_dirsCompleted = 0;
+    m_entriesPublished = 0;
+    bool allCompleted = true;
 
     std::vector<std::wstring> watchedDirs;
     {
@@ -134,7 +142,10 @@ void Scanner::FullScan() {
     auto fullScanStart = std::chrono::steady_clock::now();
 
     for (const auto& rootDir : watchedDirs) {
-        if (WaitForSingleObject(m_stopEvent, 0) == WAIT_OBJECT_0) break;
+        if (WaitForSingleObject(m_stopEvent, 0) == WAIT_OBJECT_0) {
+            allCompleted = false;
+            break;
+        }
 
         {
             std::lock_guard lock(m_stateMutex);
@@ -145,34 +156,36 @@ void Scanner::FullScan() {
 
         std::vector<DirEntry> entries;
         ScanResult result = ScanDirectory(rootDir, 0, entries);
+        // Even on cancellation, these rows describe completed subtrees.
+        // Keep their useful results, but never publish a partial parent.
+        bool written = FlushEntries(entries);
+        bool completed = result.complete && written &&
+            WaitForSingleObject(m_stopEvent, 0) != WAIT_OBJECT_0;
+        allCompleted = allCompleted && completed;
 
         auto dirElapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - dirStart).count();
-        Log(LogSeverity::Info, L"Scanned %s \u2014 %llu files, %llu dirs, %.1fs",
+        Log(completed ? LogSeverity::Info : LogSeverity::Error,
+            L"Scan %s: %s \u2014 %llu files, %llu dirs, %.1fs",
+            completed ? L"completed" : L"incomplete",
             rootDir.c_str(), result.fileCount, result.dirCount, dirElapsed);
-
-        // Batch write in chunks to avoid holding the DB lock too long
-        constexpr size_t kBatchSize = 500;
-        for (size_t i = 0; i < entries.size(); i += kBatchSize) {
-            if (WaitForSingleObject(m_stopEvent, 0) == WAIT_OBJECT_0) break;
-
-            size_t end = (std::min)(i + kBatchSize, entries.size());
-            std::vector<DirEntry> batch(entries.begin() + i, entries.begin() + end);
-            m_db->UpsertEntries(batch);
-        }
     }
 
     {
         std::lock_guard lock(m_stateMutex);
         m_currentScanPath.clear();
         auto now = std::chrono::system_clock::now();
-        m_lastFullScanTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()).count();
+        if (allCompleted) {
+            m_lastFullScanTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()).count();
+        }
     }
 
     auto fullElapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - fullScanStart).count();
-    Log(LogSeverity::Info, "Full scan completed in %.1f seconds", fullElapsed);
+    Log(allCompleted ? LogSeverity::Info : LogSeverity::Error,
+        "Full scan %s in %.1f seconds (%llu directory entries published)",
+        allCompleted ? "completed" : "incomplete", fullElapsed, m_entriesPublished);
 
     m_scanning.store(false);
 }
@@ -181,6 +194,10 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
                                   std::vector<DirEntry>& outEntries) {
     ScanResult result;
     result.path = rootPath;
+    if (rootPath.empty()) {
+        result.complete = false;
+        return result;
+    }
 
     // Build search pattern. Use \\?\ prefix for long path support.
     std::wstring searchPath = rootPath;
@@ -205,6 +222,7 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
         if (err == ERROR_ACCESS_DENIED) {
             Log(LogSeverity::Verbose, L"Access denied: %s", rootPath.c_str());
         }
+        result.complete = false;
         return result;
     }
 
@@ -212,6 +230,7 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
         // Check for stop
         if (WaitForSingleObject(m_stopEvent, 0) == WAIT_OBJECT_0) {
             FindClose(hFind);
+            result.complete = false;
             return result;
         }
 
@@ -233,6 +252,13 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
 
             // Recurse into subdirectory
             ScanResult childResult = ScanDirectory(childPath, depth + 1, outEntries);
+            result.complete = result.complete && childResult.complete;
+            // A failed full batch must not keep growing as recursion
+            // unwinds and sibling scans append more entries.
+            if (!childResult.complete && outEntries.size() >= 500) {
+                FindClose(hFind);
+                return result;
+            }
             result.totalSize += childResult.totalSize;
             result.allocSize += childResult.allocSize;
             result.fileCount += childResult.fileCount;
@@ -253,13 +279,32 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
             }
 
             result.fileCount++;
+            ++m_filesSeen;
         }
 
-        m_throttle.Checkpoint();
+        if (!ReportProgress(childPath, outEntries)) {
+            FindClose(hFind);
+            result.complete = false;
+            return result;
+        }
 
     } while (FindNextFileW(hFind, &findData));
 
+    DWORD enumError = GetLastError();
     FindClose(hFind);
+    if (enumError != ERROR_NO_MORE_FILES) {
+        Log(LogSeverity::Error, L"Enumeration failed: %s (error %lu)",
+            rootPath.c_str(), enumError);
+        result.complete = false;
+    }
+    if (!result.complete || WaitForSingleObject(m_stopEvent, 0) == WAIT_OBJECT_0) {
+        result.complete = false;
+        return result;
+    }
+
+    // The throttle is specified in DIRECTORIES, not files. A flat folder
+    // with millions of files should not spend minutes in artificial sleeps.
+    m_throttle.Checkpoint();
 
     // Record this directory's computed size
     auto now = std::chrono::system_clock::now();
@@ -275,8 +320,46 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
     entry.scanTime = epoch;
     entry.depth = depth;
     outEntries.push_back(std::move(entry));
+    ++m_dirsCompleted;
+    if (outEntries.size() >= 500 && !FlushEntries(outEntries)) {
+        result.complete = false;
+    }
 
     return result;
+}
+
+bool Scanner::FlushEntries(std::vector<DirEntry>& entries) {
+    if (entries.empty()) return true;
+    if (!m_db->UpsertEntries(entries)) {
+        Log(LogSeverity::Error, "Failed to commit scan results to database");
+        return false;
+    }
+    m_entriesPublished += entries.size();
+    // Tell open Explorer views about committed results while scanning.
+    for (const auto& entry : entries) {
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+            entry.path.c_str(), nullptr);
+    }
+    entries.clear();
+    return true;
+}
+
+bool Scanner::ReportProgress(const std::wstring& path, std::vector<DirEntry>& entries) {
+    ULONGLONG now = GetTickCount64();
+    if (now - m_lastProgressTick < 1000) return true;
+    m_lastProgressTick = now;
+    // Time-bounded flush also handles fewer than 500 completed folders
+    // followed by a large/slow subtree. Do not wait for that subtree.
+    if (!FlushEntries(entries)) return false;
+    {
+        std::lock_guard lock(m_stateMutex);
+        m_currentScanPath = path;
+    }
+    Log(LogSeverity::Info,
+        L"Scan progress: %llu files seen, %llu directories completed, "
+        L"%llu entries published; %s",
+        m_filesSeen, m_dirsCompleted, m_entriesPublished, path.c_str());
+    return true;
 }
 
 DWORD Scanner::GetClusterSize(wchar_t driveLetter) {

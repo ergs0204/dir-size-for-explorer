@@ -8,8 +8,25 @@ add_executable(test_scanner test_scanner.cpp)
 target_link_libraries(test_scanner PRIVATE DirSizeCommon)
 add_test(NAME ScannerTests COMMAND test_scanner)
 
+# Exercise the production scanner, not the simplified copy above. Detours
+# pauses enumeration at a deterministic boundary inside this test process.
+add_executable(test_scan_progress test_scan_progress.cpp
+    ../service/scanner.cpp ../service/throttle.cpp ../service/log_buffer.cpp)
+target_include_directories(test_scan_progress PRIVATE ../service ${DETOURS_INCLUDE_DIRS})
+target_link_libraries(test_scan_progress PRIVATE DirSizeCommon
+    $<IF:$<CONFIG:Debug>,${DETOURS_LIBRARY_DEBUG},${DETOURS_LIBRARY_RELEASE}>)
+add_test(NAME ScanProgressTests COMMAND test_scan_progress)
+set_tests_properties(ScanProgressTests PROPERTIES TIMEOUT 30)
+
+# Existing tests use assert() for both checks and operations: keep them
+# enabled in Release builds too.
+foreach(test_target test_db test_scanner)
+    target_compile_options(${test_target} PRIVATE /UNDEBUG)
+endforeach()
+
 add_executable(test_ipc test_ipc.cpp)
 target_link_libraries(test_ipc PRIVATE DirSizeCommon)
+target_compile_options(test_ipc PRIVATE /UNDEBUG)
 add_test(NAME IpcTests COMMAND test_ipc)
 
 add_executable(manual_insert manual_insert.cpp)

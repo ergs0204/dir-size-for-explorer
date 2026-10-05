@@ -1,5 +1,7 @@
 # Build output
 build/
+build-*/
+build-tools/
 out/
 x64/
 

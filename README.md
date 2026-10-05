@@ -1,5 +1,12 @@
 # DirSize for Explorer
 
+This fork's `fix/scan-progress` branch is a **1.1.1 patch for the published
+1.1.0 service-based release**. It commits completed folders during scanning,
+reports progress, and fixes file-count-based throttling. See
+[diagnosis, tests and build instructions](docs/scan-progress-fix.md).
+Upstream's newer `master` uses a different tray-hosted architecture; this
+branch intentionally retains the installed release's service and IPC format.
+
 A Windows shell extension that displays **directory sizes** directly in Explorer's built-in **Size** column — no extra columns, no third-party file managers.
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Architecture: x64](https://img.shields.io/badge/arch-x64-blue)

@@ -88,11 +88,7 @@
               KeyPath="yes" />
       </Component>
 
-      <!-- SQLite3 runtime -->
-      <Component Id="Sqlite3Dll" Guid="1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D">
-        <File Id="sqlite3.dll" Source="$(var.BuildDir)\sqlite3.dll"
-              KeyPath="yes" />
-      </Component>
+      <!-- SQLite and the C runtime are linked statically. -->
     </ComponentGroup>
   </Fragment>
 

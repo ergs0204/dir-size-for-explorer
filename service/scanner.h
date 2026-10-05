@@ -23,6 +23,7 @@ struct ScanResult {
     uint64_t allocSize = 0; // "Size on disk" — cluster-rounded
     uint64_t fileCount = 0;
     uint64_t dirCount = 0;
+    bool complete = true;
 };
 
 class Scanner {
@@ -59,9 +60,13 @@ private:
     // Perform a full scan of all watched directories.
     void FullScan();
 
-    // Scan a single directory tree. Returns results for all directories found.
+    // Completed subtrees are committed incrementally; unfinished parents
+    // are never written as if their totals were complete.
     ScanResult ScanDirectory(const std::wstring& rootPath, int depth,
                              std::vector<DirEntry>& outEntries);
+
+    bool FlushEntries(std::vector<DirEntry>& entries);
+    bool ReportProgress(const std::wstring& path, std::vector<DirEntry>& entries);
 
     std::shared_ptr<Database> m_db;
     Config m_config;
@@ -87,6 +92,11 @@ private:
     mutable std::mutex m_stateMutex;
     std::wstring m_currentScanPath;
     int64_t m_lastFullScanTime = 0;     // Unix epoch milliseconds
+    // Only the scheduler thread updates these counters.
+    ULONGLONG m_lastProgressTick = 0;
+    uint64_t m_filesSeen = 0;
+    uint64_t m_dirsCompleted = 0;
+    uint64_t m_entriesPublished = 0;
 };
 
 } // namespace dirsize

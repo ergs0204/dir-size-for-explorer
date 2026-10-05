@@ -5,7 +5,7 @@
 
   <Package Name="DirSize for Explorer"
            Manufacturer="DirSize Project"
-           Version="1.1.0.0"
+           Version="1.1.1.0"
            UpgradeCode="E8F1A2B3-C4D5-6E7F-8A9B-0C1D2E3F4A5B"
            InstallerVersion="500">
 
@@ -60,7 +60,7 @@
 
     <!-- Exit dialog: informational text + launch checkbox -->
     <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
-              Value="DirSize for Explorer has been installed successfully. Directory sizes will appear in the Size column once the background scan completes." />
+              Value="DirSize for Explorer has been installed successfully. Completed folder sizes will appear while the background scan runs. Check the Logging tab for progress." />
 
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
